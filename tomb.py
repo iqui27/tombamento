@@ -7,6 +7,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import TimeoutException
 import pandas as pd
 import time
+from datetime import datetime
 
 
 import re
@@ -323,14 +324,21 @@ class SisgepatAutomation:
             print(f"Erro ao preencher tombamento {numero}: {str(e)}")
             return False
 
-    def processar_tombamentos(self, excel_file):
+    def processar_tombamentos(self, excel_file, tombamentos_selecionados=None):
         """
-        Processa todos os números de tombamento do arquivo Excel
+        Processa os números de tombamento do arquivo Excel
+        tombamentos_selecionados: lista opcional de índices dos tombamentos a processar
         """
         try:
             # Lê o arquivo Excel
             df = pd.read_excel(excel_file)
+            
+            # Se tiver tombamentos selecionados, filtra o DataFrame
+            if tombamentos_selecionados is not None:
+                df = df.iloc[tombamentos_selecionados]
+            
             total = len(df)
+            resultados = []  # Lista para armazenar resultados
             
             # Estima tempo total (aproximadamente 10 segundos por tombamento)
             tempo_estimado = total * 10
@@ -374,11 +382,18 @@ class SisgepatAutomation:
                     'tempo_restante': tempo_restante
                 }
                 
-                if self.preencher_tombamento(numero):
+                sucesso = self.preencher_tombamento(numero)
+                resultados.append({
+                    'numero': numero,
+                    'sucesso': sucesso,
+                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                })
+                
+                if sucesso:
                     sucessos += 1
-                    time.sleep(1)  # Espera entre tombamentos bem-sucedidos
+                    time.sleep(1)
                 else:
-                    time.sleep(2)  # Espera maior se houver falha
+                    time.sleep(2)
             
             # Após inserir todos, clica em Emitir
             try:

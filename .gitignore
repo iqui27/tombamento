@@ -42,8 +42,16 @@ temp_*
 *.swo
 
 # Streamlit
-.streamlit/
+.streamlit/secrets.toml
 
 # Sistema operacional
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Credenciais e configurações locais
+*.env
+config.local.toml
+
+# Arquivos temporários do sistema
+numeros_tombamento*.xlsx
+temp_*.pdf
