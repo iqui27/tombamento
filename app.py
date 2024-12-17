@@ -115,11 +115,7 @@ def main():
             total_pdfs = len(uploaded_pdfs)
             st.success(f"{total_pdfs} {'arquivo' if total_pdfs == 1 else 'arquivos'} carregado{'s' if total_pdfs > 1 else ''}!")
             
-            if st.button("Processar PDFs e Iniciar Tombamento", type="primary", key="pdf_button"):
-                if not cpf or not senha:
-                    st.error("Por favor, preencha as credenciais primeiro!")
-                    return
-                
+            try:
                 # Processar PDFs
                 with st.spinner("Extraindo números de tombamento..."):
                     df = process_multiple_pdfs(uploaded_pdfs)
@@ -127,13 +123,93 @@ def main():
                 if not df.empty:
                     st.success(f"Encontrados {len(df)} números de tombamento únicos!")
                     
-                    # Salvar números em Excel temporário
-                    excel_path = "numeros_tombamento_combinados.xlsx"
-                    df.to_excel(excel_path, index=False)
+                    # Carrega histórico de processamento se existir
+                    historico_file = 'historico_tombamento.xlsx'
+                    if os.path.exists(historico_file):
+                        df_historico = pd.read_excel(historico_file)
+                        sucessos = df_historico[df_historico['sucesso']]['numero'].tolist()
+                        falhas = df_historico[~df_historico['sucesso']]['numero'].tolist()
+                        
+                        # Mostra estatísticas do histórico
+                        with st.expander("📊 Ver histórico de processamento"):
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("Processados com sucesso", len(sucessos))
+                            with col2:
+                                st.metric("Falhas", len(falhas))
+                            with col3:
+                                taxa = len(sucessos)/(len(sucessos) + len(falhas)) * 100 if sucessos or falhas else 0
+                                st.metric("Taxa de Sucesso", f"{taxa:.1f}%")
+                            
+                            # Tabs para ver detalhes
+                            tab_sucesso, tab_falha = st.tabs(["✅ Sucessos", "❌ Falhas"])
+                            with tab_sucesso:
+                                if sucessos:
+                                    st.dataframe(df_historico[df_historico['sucesso']])
+                                else:
+                                    st.info("Nenhum tombamento processado com sucesso ainda.")
+                            
+                            with tab_falha:
+                                if falhas:
+                                    st.dataframe(df_historico[~df_historico['sucesso']])
+                                else:
+                                    st.success("Nenhuma falha registrada!")
+                    
+                    # Opções de processamento
+                    opcao = st.radio(
+                        "Selecione o modo de processamento:",
+                        ["✨ Processar todos",
+                         "🎯 Processar selecionados",
+                         "🔄 Reprocessar falhas",
+                         "📝 Processar pendentes"],
+                        key="pdf_radio"
+                    )
+                    
+                    if opcao == "🎯 Processar selecionados":
+                        st.write("Selecione os números para processar:")
+                        cols = st.columns(4)
+                        selected_indices = []
+                        
+                        for idx, row in df.iterrows():
+                            numero = row['Numero_Tombamento']
+                            col_idx = idx % 4
+                            if cols[col_idx].checkbox(
+                                f"{numero}",
+                                key=f"pdf_check_{idx}",
+                                help="Marque para processar este número"
+                            ):
+                                selected_indices.append(idx)
+                        
+                        if not selected_indices:
+                            st.warning("⚠️ Selecione pelo menos um número para processar")
+                            return
+                    
+                    elif opcao == "🔄 Reprocessar falhas":
+                        if not os.path.exists(historico_file):
+                            st.warning("⚠️ Não há histórico de processamentos anteriores")
+                            return
+                        
+                        df_temp = df[df['Numero_Tombamento'].isin(falhas)]
+                        if df_temp.empty:
+                            st.success("✨ Não há falhas para reprocessar!")
+                            return
+                        df = df_temp
+                    
+                    elif opcao == "📝 Processar pendentes":
+                        if os.path.exists(historico_file):
+                            processados = df_historico['numero'].tolist()
+                            df_temp = df[~df['Numero_Tombamento'].isin(processados)]
+                            if df_temp.empty:
+                                st.success("✨ Não há números pendentes para processar!")
+                                return
+                            df = df_temp
                     
                     # Mostrar preview e opção de download
-                    with st.expander("Ver números encontrados"):
+                    with st.expander("🔍 Ver números a processar"):
                         st.dataframe(df)
+                        st.info(f"Total de números a processar: {len(df)}")
+                        excel_path = "numeros_tombamento_combinados.xlsx"
+                        df.to_excel(excel_path, index=False)
                         with open(excel_path, "rb") as f:
                             st.download_button(
                                 label="📥 Baixar números em Excel",
@@ -142,76 +218,107 @@ def main():
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                             )
                     
-                    try:
-                        bot = SisgepatAutomation()
-                        
-                        # Login
-                        with st.spinner("Realizando login..."):
-                            if bot.login_with_javascript(cpf, senha):
-                                st.success("Login realizado com sucesso!")
-                                
-                                # Componentes de progresso
-                                progress_bar = st.progress(0)
-                                status_text = st.empty()
-                                metrics_cols = st.columns(3)
-                                tempo_col = metrics_cols[0].empty()
-                                progresso_col = metrics_cols[1].empty()
-                                sucessos_col = metrics_cols[2].empty()
-                                
-                                # Processar tombamentos
-                                for info in bot.processar_tombamentos(excel_path):
-                                    if info['status'] == 'inicio':
-                                        status_text.text("Iniciando processamento...")
-                                        tempo_col.metric("Tempo Estimado", f"{info['tempo_estimado']//60} min")
-                                        
-                                    elif info['status'] == 'processando':
-                                        # Atualiza barra de progresso
-                                        progress_bar.progress(info['progresso'])
-                                        
-                                        # Atualiza status
-                                        status_text.text(f"Processando {info['index']}/{info['total']}: {info['numero']}")
-                                        
-                                        # Atualiza métricas
-                                        tempo_col.metric("Tempo Restante", f"{info['tempo_restante']//60:.0f} min")
-                                        progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
-                                        
-                                    elif info['status'] == 'finalizando':
-                                        status_text.text("Finalizando processamento...")
-                                        
-                                    elif info['status'] == 'concluido':
-                                        progress_bar.progress(1.0)
-                                        status_text.text("Processamento concluído!")
-                                        tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
-                                        sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
-                                        st.success("Processamento concluído com sucesso!")
-                                        
-                                    elif info['status'] == 'erro':
-                                        st.error(f"Erro no processamento: {info['mensagem']}")
-                                        break
-                            else:
-                                st.error("Falha no login! Verifique suas credenciais.")
+                    # Botão de processamento
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        iniciar = st.button(
+                            "▶️ Iniciar Processamento", 
+                            type="primary",
+                            help="Clique para iniciar o processamento dos números selecionados",
+                            key="pdf_button"
+                        )
+                    with col2:
+                        tempo_estimado = len(df) * 10
+                        st.info(f"⏱️ Tempo estimado: {tempo_estimado//60} min")
                     
-                    except Exception as e:
-                        st.error(f"Erro durante o processamento: {str(e)}")
-                    
-                    finally:
-                        # Limpar arquivo temporário
-                        if os.path.exists(excel_path):
-                            os.remove(excel_path)
+                    if iniciar:
+                        if not cpf or not senha:
+                            st.error("Por favor, preencha as credenciais primeiro!")
+                            return
+                            
                         try:
-                            bot.close()
-                        except:
-                            pass
-                
+                            bot = SisgepatAutomation()
+                            
+                            with st.spinner("Realizando login..."):
+                                if bot.login_with_javascript(cpf, senha):
+                                    st.success("Login realizado com sucesso!")
+                                    
+                                    # Processa tombamentos com base na opção selecionada
+                                    selected_indices = (
+                                        selected_indices if opcao == "🎯 Processar selecionados"
+                                        else None
+                                    )
+                                    
+                                    # Componentes de progresso
+                                    progress_bar = st.progress(0)
+                                    status_text = st.empty()
+                                    metrics_cols = st.columns(4)
+                                    tempo_col = metrics_cols[0].empty()
+                                    progresso_col = metrics_cols[1].empty()
+                                    sucessos_col = metrics_cols[2].empty()
+                                    falhas_col = metrics_cols[3].empty()
+                                    
+                                    # Processa tombamentos
+                                    for info in bot.processar_tombamentos(excel_path, selected_indices):
+                                        if info['status'] == 'inicio':
+                                            status_text.text("Iniciando processamento...")
+                                            tempo_col.metric("Tempo Estimado", f"{info['tempo_estimado']//60} min")
+                                            
+                                        elif info['status'] == 'processando':
+                                            # Atualiza barra de progresso
+                                            progress_bar.progress(info['progresso'])
+                                            
+                                            # Atualiza status
+                                            status_text.text(f"Processando {info['index']}/{info['total']}: {info['numero']}")
+                                            
+                                            # Atualiza métricas
+                                            tempo_col.metric("Tempo Restante", f"{info['tempo_restante']//60:.0f} min")
+                                            progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
+                                            
+                                        elif info['status'] == 'finalizando':
+                                            status_text.text("Finalizando processamento...")
+                                            
+                                        elif info['status'] == 'concluido':
+                                            progress_bar.progress(1.0)
+                                            status_text.text("Processamento concluído!")
+                                            tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
+                                            sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
+                                            falhas_col.metric("Falhas", f"{info['total'] - info['sucessos']}")
+                                            
+                                            # Mostra resultados detalhados
+                                            if os.path.exists('resultados_tombamento.xlsx'):
+                                                df_resultados = pd.read_excel('resultados_tombamento.xlsx')
+                                                st.write("Resultados do processamento:")
+                                                st.dataframe(df_resultados)
+                                            
+                                            st.success("Processamento concluído com sucesso!")
+                                            
+                                        elif info['status'] == 'erro':
+                                            st.error(f"Erro no processamento: {info['mensagem']}")
+                                            break
+                                else:
+                                    st.error("Falha no login!")
+                                
+                        except Exception as e:
+                            st.error(f"Erro: {str(e)}")
+                        
+                        finally:
+                            try:
+                                bot.close()
+                            except:
+                                pass
+                                
+                            # Atualiza estatísticas
+                            st.session_state.pdfs_processados += len(uploaded_pdfs)
+                            st.session_state.tombamentos_realizados += len(df)
+                            st.session_state.log_atividades.append(
+                                f"{datetime.now().strftime('%H:%M:%S')} - Processados {len(df)} números de {len(uploaded_pdfs)} PDFs"
+                            )
                 else:
-                    st.error("Nenhum número de tombamento encontrado nos PDFs!")
-                
-                # Após processar PDFs:
-                st.session_state.pdfs_processados += len(uploaded_pdfs)
-                st.session_state.tombamentos_realizados += len(df)
-                st.session_state.log_atividades.append(
-                    f"{datetime.now().strftime('%H:%M:%S')} - Processados {len(df)} números de {len(uploaded_pdfs)} PDFs"
-                )
+                    st.warning("Nenhum número de tombamento encontrado nos PDFs!")
+                    
+            except Exception as e:
+                st.error(f"Erro ao processar PDFs: {str(e)}")
     
     with tab2:
         st.header("Upload de Excel")
