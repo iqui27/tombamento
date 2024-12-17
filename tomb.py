@@ -106,9 +106,11 @@ class SisgepatAutomation:
         chrome_options = webdriver.ChromeOptions()
         chrome_options.add_argument('--start-maximized')
         
-        # Inicializa o navegador Chrome
-        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), 
-                                     options=chrome_options)
+        # Inicializa o navegador Chrome localmente
+        self.driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()), 
+            options=chrome_options
+        )
         self.wait = WebDriverWait(self.driver, 10)
 
     def login(self, cpf, senha, ano="2024"):
@@ -328,51 +330,88 @@ class SisgepatAutomation:
         try:
             # Lê o arquivo Excel
             df = pd.read_excel(excel_file)
+            total = len(df)
+            
+            # Estima tempo total (aproximadamente 10 segundos por tombamento)
+            tempo_estimado = total * 10
+            tempo_inicio = time.time()
+            
+            # Retorna informações para o frontend
+            yield {
+                'status': 'inicio',
+                'total': total,
+                'tempo_estimado': tempo_estimado
+            }
             
             # Navega até a tela correta
             if not self.navegar_para_dados_gerais():
-                return False
+                yield {'status': 'erro', 'mensagem': 'Erro na navegação inicial'}
+                return
+            
+            # Aguarda mais tempo antes de começar o primeiro tombamento
+            time.sleep(5)  # Aumentei para 5 segundos
             
             # Para cada número de tombamento
-            total = len(df)
+            sucessos = 0
             for index, row in df.iterrows():
                 numero = row['Numero_Tombamento']
-                print(f"Processando tombamento {index + 1}/{total}: {numero}")
                 
-                if not self.preencher_tombamento(numero):
-                    print(f"Falha ao processar tombamento {numero}")
-                    continue
+                # No primeiro tombamento, espera mais tempo
+                if index == 0:
+                    time.sleep(3)  # Espera adicional para o primeiro
                 
+                # Calcula progresso e tempo restante
+                progresso = (index + 1) / total
+                tempo_decorrido = time.time() - tempo_inicio
+                tempo_restante = (tempo_decorrido / (index + 1)) * (total - (index + 1)) if index > 0 else tempo_estimado
+                
+                yield {
+                    'status': 'processando',
+                    'numero': numero,
+                    'index': index + 1,
+                    'total': total,
+                    'progresso': progresso,
+                    'tempo_restante': tempo_restante
+                }
+                
+                if self.preencher_tombamento(numero):
+                    sucessos += 1
+                    time.sleep(1)  # Espera entre tombamentos bem-sucedidos
+                else:
+                    time.sleep(2)  # Espera maior se houver falha
+            
             # Após inserir todos, clica em Emitir
             try:
-                print("Clicando no botão Emitir...")
+                yield {'status': 'finalizando', 'mensagem': 'Emitindo documento...'}
                 emitir_button = self.wait.until(
                     EC.element_to_be_clickable((
                         By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
                     ))
                 )
                 self.driver.execute_script("arguments[0].click();", emitir_button)
-                print("✓ Clicou em Emitir")
                 
                 # Aguarda e clica no botão Sim do alerta
-                print("Confirmando alerta...")
                 confirmar_button = self.wait.until(
                     EC.element_to_be_clickable((
                         By.ID, "btnModalOk"
                     ))
                 )
                 self.driver.execute_script("arguments[0].click();", confirmar_button)
-                print("✓ Confirmou alerta")
-                time.sleep(2)
                 
+                yield {
+                    'status': 'concluido',
+                    'total': total,
+                    'sucessos': sucessos,
+                    'tempo_total': time.time() - tempo_inicio
+                }
                 return True
                 
             except Exception as e:
-                print(f"Erro ao finalizar processo: {str(e)}")
+                yield {'status': 'erro', 'mensagem': f"Erro ao finalizar: {str(e)}"}
                 return False
                 
         except Exception as e:
-            print(f"Erro ao processar arquivo: {str(e)}")
+            yield {'status': 'erro', 'mensagem': f"Erro ao processar arquivo: {str(e)}"}
             return False
 
     def close(self):
