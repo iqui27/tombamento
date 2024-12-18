@@ -52,6 +52,10 @@ def init_session_state():
         st.session_state.sucessos = 0
     if 'log_atividades' not in st.session_state:
         st.session_state.log_atividades = []
+    if 'num_sucessos' not in st.session_state:
+        st.session_state.num_sucessos = 0
+    if 'num_falhas' not in st.session_state:
+        st.session_state.num_falhas = 0
 
 def process_tombamentos(bot, tombamentos, status_text, progress_bar):
     total = len(tombamentos)
@@ -142,11 +146,11 @@ def main():
                     st.success(f"Encontrados {len(df)} números de tombamento únicos!")
                     
                     # Carrega histórico de processamento se existir
-                    historico_file = 'historico_tombamento.xlsx'
-                    if os.path.exists(historico_file):
-                        df_historico = pd.read_excel(historico_file)
-                        sucessos = df_historico[df_historico['sucesso']]['numero'].tolist()
-                        falhas = df_historico[~df_historico['sucesso']]['numero'].tolist()
+                    df_historico = db.get_tombamentos_status()
+                    if not df_historico.empty:
+                        
+                        sucessos = df_historico[df_historico['status'] == 'sucesso']['numero'].tolist()
+                        falhas = df_historico[df_historico['status'] == 'falha']['numero'].tolist()
                         
                         # Mostra estatísticas do histórico
                         with st.expander("📊 Ver histórico de processamento"):
@@ -163,13 +167,13 @@ def main():
                             tab_sucesso, tab_falha = st.tabs(["✅ Sucessos", "❌ Falhas"])
                             with tab_sucesso:
                                 if sucessos:
-                                    st.dataframe(df_historico[df_historico['sucesso']])
+                                    st.dataframe(df_historico[df_historico['status'] == 'sucesso'])
                                 else:
                                     st.info("Nenhum tombamento processado com sucesso ainda.")
                             
                             with tab_falha:
                                 if falhas:
-                                    st.dataframe(df_historico[~df_historico['sucesso']])
+                                    st.dataframe(df_historico[df_historico['status'] == 'falha'])
                                 else:
                                     st.success("Nenhuma falha registrada!")
                     
@@ -205,18 +209,19 @@ def main():
                             return
                     
                     elif opcao == "🔄 Reprocessar falhas":
-                        if not os.path.exists(historico_file):
+                         if df_historico.empty:
                             st.warning("⚠️ Não há histórico de processamentos anteriores")
                             return
                         
-                        df_temp = df[df['Numero_Tombamento'].isin(falhas)]
-                        if df_temp.empty:
-                            st.success("✨ Não há falhas para reprocessar!")
-                            return
-                        df = df_temp
+                         falhas = df_historico[df_historico['status'] == 'falha']['numero'].tolist()
+                         df_temp = df[df['Numero_Tombamento'].isin(falhas)]
+                         if df_temp.empty:
+                             st.success("✨ Não há falhas para reprocessar!")
+                             return
+                         df = df_temp
                     
                     elif opcao == "📝 Processar pendentes":
-                        if os.path.exists(historico_file):
+                        if not df_historico.empty:
                             processados = df_historico['numero'].tolist()
                             df_temp = df[~df['Numero_Tombamento'].isin(processados)]
                             if df_temp.empty:
@@ -255,6 +260,12 @@ def main():
                         if not cpf or not senha:
                             st.error("Por favor, preencha as credenciais primeiro!")
                             return
+                        # Inicializa contadores AQUI, antes de qualquer processamento
+                        total_registros = len(df)
+                        tempo_inicio = time.time()
+                        tempo_estimado = total_registros * 10
+                        st.session_state.num_sucessos = 0
+                        st.session_state.num_falhas = 0
                             
                         try:
                             bot = SisgepatAutomation()
@@ -295,10 +306,6 @@ def main():
                                         falhas=0
                                     )
 
-                                    # Variáveis de controle
-                                    sucessos = 0
-                                    falhas = 0
-                                    tempo_inicio = time.time()
                                     # Processa tombamentos
                                     for info in bot.processar_tombamentos(excel_path, selected_indices):
                                         if info['status'] == 'inicio':
@@ -335,36 +342,47 @@ def main():
                                                     mensagem_erro=info.get('mensagem_erro')
                                                 )
                                                 
+                                                # Atualiza contadores
                                                 if info['sucesso']:
-                                                    sucessos += 1
+                                                    st.session_state.num_sucessos += 1
                                                 else:
-                                                    falhas += 1
-                                                    
-                                                sucessos_col.metric("Sucessos", sucessos)
-                                                falhas_col.metric("Falhas", falhas)
+                                                    st.session_state.num_falhas += 1
+                                                
+                                                # Atualiza métricas na interface
+                                                sucessos_col.metric("Sucessos", str(st.session_state.num_sucessos))
+                                                falhas_col.metric("Falhas", str(st.session_state.num_falhas))
                                                 
                                             except Exception as e:
                                                 st.error(f"Erro ao registrar tombamento: {str(e)}")
+                                                st.session_state.num_falhas += 1
+                                                falhas_col.metric("Falhas", str(st.session_state.num_falhas))
                                             
                                         elif info['status'] == 'finalizando':
                                             status_text.text("Finalizando processamento...")
                                             
                                         elif info['status'] == 'concluido':
                                             progress_bar.progress(1.0)
+                                            # Calcula tempo total
+                                            tempo_total = time.time() - tempo_inicio
                                             status_text.text("Processamento concluído!")
-                                            tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
-                                            sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
-                                            falhas_col.metric("Falhas", f"{info['total'] - info['sucessos']}")
+                                            tempo_col.metric(
+                                                "Tempo Total", 
+                                                f"{int(tempo_total)//60} min {int(tempo_total)%60} seg"
+    )
+                                            sucessos_col.metric("Sucessos", f"{st.session_state.num_sucessos}/{info['total']}")
+                                            falhas_col.metric("Falhas", f"{info['total'] - st.session_state.num_sucessos}")
                                              # Atualiza o processamento no banco
+                                            # Atualiza o processamento no banco
                                             try:
                                                 db.atualizar_processamento(
                                                     processamento_id,
-                                                    sucessos=sucessos,
-                                                    falhas=falhas
+                                                    sucessos=st.session_state.num_sucessos,  # Usa a variável que foi sendo atualizada durante o processamento
+                                                    falhas=st.session_state.num_falhas      # Usa a variável que foi sendo atualizada durante o processamento
                                                 )
-                                                st.success("Processamento concluído com sucesso!")
+                                                st.success(f"Processamento concluído com sucesso! Sucessos: {st.session_state.num_sucessos}, Falhas: {st.session_state.num_falhas}")
                                             except Exception as e:
                                                 st.error(f"Erro ao atualizar processamento: {str(e)}")
+                                                
                                             # Mostra resultados detalhados
                                             if os.path.exists('resultados_tombamento.xlsx'):
                                                 df_resultados = pd.read_excel('resultados_tombamento.xlsx')
@@ -415,34 +433,33 @@ def main():
                 st.success(f"Excel carregado com sucesso! {len(df)} números encontrados.")
                 
                 # Carrega histórico de processamento se existir
-                historico_file = 'historico_tombamento.xlsx'
-                if os.path.exists(historico_file):
-                    df_historico = pd.read_excel(historico_file)
-                    sucessos = df_historico[df_historico['sucesso']]['numero'].tolist()
-                    falhas = df_historico[~df_historico['sucesso']]['numero'].tolist()
+                df_historico = db.get_tombamentos_status()
+                if not df_historico.empty:
+                    num_sucessos = df_historico[df_historico['status'] == 'sucesso']['numero'].tolist()
+                    num_falhas = df_historico[df_historico['status'] == 'falha']['numero'].tolist()
                     
                     # Mostra estatísticas do histórico
                     with st.expander("📊 Ver histórico de processamento"):
                         col1, col2, col3 = st.columns(3)
                         with col1:
-                            st.metric("Processados com sucesso", len(sucessos))
+                            st.metric("Processados com sucesso", len(num_sucessos))
                         with col2:
-                            st.metric("Falhas", len(falhas))
+                            st.metric("Falhas", len(num_falhas))
                         with col3:
-                            taxa = len(sucessos)/(len(sucessos) + len(falhas)) * 100 if sucessos or falhas else 0
+                            taxa = len(num_sucessos)/(len(num_sucessos) + len(num_falhas)) * 100 if num_sucessos or num_falhas else 0
                             st.metric("Taxa de Sucesso", f"{taxa:.1f}%")
                         
                         # Tabs para ver detalhes
                         tab_sucesso, tab_falha = st.tabs(["✅ Sucessos", "❌ Falhas"])
                         with tab_sucesso:
-                            if sucessos:
-                                st.dataframe(df_historico[df_historico['sucesso']])
+                            if num_sucessos:
+                                st.dataframe(df_historico[df_historico['status'] == 'sucesso'])
                             else:
                                 st.info("Nenhum tombamento processado com sucesso ainda.")
                         
                         with tab_falha:
-                            if falhas:
-                                st.dataframe(df_historico[~df_historico['sucesso']])
+                            if num_falhas:
+                                st.dataframe(df_historico[df_historico['status'] == 'falha'])
                             else:
                                 st.success("Nenhuma falha registrada!")
                 
@@ -478,19 +495,20 @@ def main():
                         return
                 
                 elif opcao == "🔄 Reprocessar falhas":
-                    if not os.path.exists(historico_file):
+                    if df_historico.empty:
                         st.warning("⚠️ Não há histórico de processamentos anteriores")
                         return
                     
                     # Filtra apenas os números que falharam
-                    df_temp = df[df['Numero_Tombamento'].isin(falhas)]
+                    num_falhas = df_historico[df_historico['status'] == 'falha']['numero'].tolist()
+                    df_temp = df[df['Numero_Tombamento'].isin(num_falhas)]
                     if df_temp.empty:
                         st.success("✨ Não há falhas para reprocessar!")
                         return
                     df = df_temp
                 
                 elif opcao == "📝 Processar pendentes":
-                    if os.path.exists(historico_file):
+                    if not df_historico.empty:
                         # Filtra números que nunca foram processados
                         processados = df_historico['numero'].tolist()
                         df_temp = df[~df['Numero_Tombamento'].isin(processados)]
@@ -649,4 +667,4 @@ def main():
                 st.success("Nenhuma falha registrada!")
 
 if __name__ == "__main__":
-    main() 
+    main()

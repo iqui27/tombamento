@@ -378,7 +378,8 @@ class SisgepatAutomation:
                 return
             
             time.sleep(5)
-            
+            sucessos = 0
+
             # Para cada número de tombamento
             for index, row in df.iterrows():
                 numero = row['Numero_Tombamento']
@@ -391,7 +392,9 @@ class SisgepatAutomation:
                 # Processa o tombamento
                 try:
                     sucesso = self.preencher_tombamento(numero)
-                    
+                    if sucesso:
+                        sucessos += 1
+
                     # Retorna informações do processamento
                     yield {
                         'status': 'processando',
@@ -399,6 +402,7 @@ class SisgepatAutomation:
                         'index': index + 1,
                         'total': total,
                         'progresso': progresso,
+                        'sucessos': sucessos,
                         'sucesso': sucesso,
                         'mensagem_erro': None if sucesso else 'Falha no preenchimento'
                     }
@@ -411,6 +415,7 @@ class SisgepatAutomation:
                         'total': total,
                         'progresso': progresso,
                         'sucesso': False,
+                        'sucessos': sucessos,
                         'mensagem_erro': str(e)
                     }
                 
@@ -433,7 +438,9 @@ class SisgepatAutomation:
                 
                 # Informa conclusão
                 yield {
-                    'status': 'concluido'
+                    'status': 'concluido',
+                    'total': total,
+                    'mensagem': 'Processamento concluído com sucesso!'
                 }
                 
             except Exception as e:
