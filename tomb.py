@@ -359,29 +359,18 @@ class SisgepatAutomation:
             print(f"Erro ao preencher tombamento {numero}: {str(e)}")
             return False
 
-    def processar_tombamentos(self, excel_file, tombamentos_selecionados=None):
+    def processar_tombamentos(self, excel_file, selected_indices=None):
         try:
             # Lê o arquivo Excel
             df = pd.read_excel(excel_file)
             
             # Se tiver tombamentos selecionados, filtra o DataFrame
-            if tombamentos_selecionados is not None:
-                df = df.iloc[tombamentos_selecionados]
+            if selected_indices is not None and len(selected_indices) > 0:
+                df = df.iloc[selected_indices]
             
             total = len(df)
-            resultados = []
             
-            # Estima tempo total
-            tempo_estimado = total * 10
-            tempo_inicio = time.time()
             
-            # Registra início do processamento no banco
-            processamento_id = yield {
-                'status': 'inicio',
-                'total': total,
-                'tempo_estimado': tempo_estimado,
-                'aguardando_id': True  # Flag para indicar que precisa do ID do processamento
-            }
             
             # Navega até a tela correta
             if not self.navegar_para_dados_gerais():
@@ -391,7 +380,6 @@ class SisgepatAutomation:
             time.sleep(5)
             
             # Para cada número de tombamento
-            sucessos = 0
             for index, row in df.iterrows():
                 numero = row['Numero_Tombamento']
                 
@@ -399,33 +387,37 @@ class SisgepatAutomation:
                     time.sleep(3)
                 
                 progresso = min((index + 1) / total, 1.0)
-                tempo_decorrido = time.time() - tempo_inicio
-                tempo_restante = (tempo_decorrido / (index + 1)) * (total - (index + 1)) if index > 0 else tempo_estimado
                 
                 # Processa o tombamento
-                sucesso = self.preencher_tombamento(numero)
+                try:
+                    sucesso = self.preencher_tombamento(numero)
+                    
+                    # Retorna informações do processamento
+                    yield {
+                        'status': 'processando',
+                        'numero': numero,
+                        'index': index + 1,
+                        'total': total,
+                        'progresso': progresso,
+                        'sucesso': sucesso,
+                        'mensagem_erro': None if sucesso else 'Falha no preenchimento'
+                    }
+                    
+                except Exception as e:
+                    yield {
+                        'status': 'processando',
+                        'numero': numero,
+                        'index': index + 1,
+                        'total': total,
+                        'progresso': progresso,
+                        'sucesso': False,
+                        'mensagem_erro': str(e)
+                    }
                 
-                # Registra o resultado no banco
-                yield {
-                    'status': 'processando',
-                    'numero': numero,
-                    'index': index + 1,
-                    'total': total,
-                    'progresso': progresso,
-                    'tempo_restante': tempo_restante,
-                    'processamento_id': processamento_id,
-                    'sucesso': sucesso
-                }
-                
-                if sucesso:
-                    sucessos += 1
-                    time.sleep(1)
-                else:
-                    time.sleep(2)
+                time.sleep(2)
             
-            # Após inserir todos, clica em Emitir
+             # Após inserir todos, clica em Emitir
             try:
-                yield {'status': 'finalizando', 'mensagem': 'Emitindo documento...'}
                 emitir_button = self.wait.until(
                     EC.element_to_be_clickable((
                         By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
@@ -435,33 +427,26 @@ class SisgepatAutomation:
                 
                 # Aguarda e clica no botão Sim do alerta
                 confirmar_button = self.wait.until(
-                    EC.element_to_be_clickable((
-                        By.ID, "btnModalOk"
-                    ))
+                    EC.element_to_be_clickable((By.ID, "btnModalOk"))
                 )
                 self.driver.execute_script("arguments[0].click();", confirmar_button)
                 
-                # Registra conclusão no banco
+                # Informa conclusão
                 yield {
-                    'status': 'concluido',
-                    'total': total,
-                    'sucessos': sucessos,
-                    'tempo_total': time.time() - tempo_inicio,
-                    'processamento_id': processamento_id
+                    'status': 'concluido'
                 }
-                return True
                 
             except Exception as e:
                 yield {
-                    'status': 'erro', 
-                    'mensagem': f"Erro ao finalizar: {str(e)}",
-                    'processamento_id': processamento_id
+                    'status': 'erro',
+                    'mensagem': f"Erro ao finalizar: {str(e)}"
                 }
-                return False
                 
         except Exception as e:
-            yield {'status': 'erro', 'mensagem': f"Erro ao processar arquivo: {str(e)}"}
-            return False
+            yield {
+                'status': 'erro',
+                'mensagem': f"Erro ao processar arquivo: {str(e)}"
+            }
 
     def close(self):
         """

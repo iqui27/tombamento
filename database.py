@@ -41,7 +41,7 @@ class TombamentoDatabase:
         conn.commit()
         conn.close()
     
-    def registrar_processamento(self, usuario, tipo_arquivo, total, sucessos, falhas):
+    def registrar_processamento(self, usuario, tipo_arquivo, total, sucessos=0, falhas=0):
         """Registra um novo processamento"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()

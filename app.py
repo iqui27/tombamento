@@ -85,8 +85,7 @@ def process_multiple_pdfs(pdf_files):
             f.write(pdf_file.getvalue())
         
         progress_text.text(f"Processando PDF {idx + 1}/{len(pdf_files)}: {pdf_file.name}")
-        progress = min((idx + 1) / len(pdf_files), 1.0)
-        progress_bar.progress(progress)
+        progress_bar.progress((idx + 1) / len(pdf_files))
         
         try:
             # Processar PDF
@@ -183,7 +182,9 @@ def main():
                          "📝 Processar pendentes"],
                         key="pdf_radio"
                     )
-                    
+                    # Inicializa selected_indices
+                    selected_indices = None
+
                     if opcao == "🎯 Processar selecionados":
                         st.write("Selecione os números para processar:")
                         cols = st.columns(4)
@@ -262,6 +263,16 @@ def main():
                                 if bot.login_with_javascript(cpf, senha):
                                     st.success("Login realizado com sucesso!")
                                     
+                                    # Processa tombamentos com base na opção selecionada
+                                    selected_indices = (
+                                        selected_indices if opcao == "🎯 Processar selecionados"
+                                        else None
+                                    )
+
+                                     # Calcula tempo estimado antes de iniciar
+                                    total_registros = len(df)
+                                    tempo_estimado = total_registros * 10 
+                                    
                                     # Componentes de progresso
                                     progress_bar = st.progress(0)
                                     status_text = st.empty()
@@ -270,55 +281,95 @@ def main():
                                     progresso_col = metrics_cols[1].empty()
                                     sucessos_col = metrics_cols[2].empty()
                                     falhas_col = metrics_cols[3].empty()
-                                    
+                                    # Inicializa métricas
+                                    tempo_col.metric("Tempo Estimado", f"{tempo_estimado//60} min")
+                                    progresso_col.metric("Progresso", "0%")
+                                    sucessos_col.metric("Sucessos", "0")
+                                    falhas_col.metric("Falhas", "0")
+                                    # Registra o processamento inicial no banco
+                                    processamento_id = db.registrar_processamento(
+                                        usuario=cpf,
+                                        tipo_arquivo="PDF" if uploaded_pdfs else "Excel",
+                                        total=total_registros,
+                                        sucessos=0,
+                                        falhas=0
+                                    )
+
+                                    # Variáveis de controle
+                                    sucessos = 0
+                                    falhas = 0
+                                    tempo_inicio = time.time()
                                     # Processa tombamentos
                                     for info in bot.processar_tombamentos(excel_path, selected_indices):
                                         if info['status'] == 'inicio':
                                             status_text.text("Iniciando processamento...")
                                             tempo_col.metric("Tempo Estimado", f"{info['tempo_estimado']//60} min")
                                             
-                                            if info.get('aguardando_id'):
-                                                # Registra o processamento no banco
-                                                processamento_id = db.registrar_processamento(
-                                                    usuario=cpf,
-                                                    tipo_arquivo="PDF" if uploaded_pdfs else "Excel",
-                                                    total=info['total'],
-                                                    sucessos=0,
-                                                    falhas=0
-                                                )
-                                                continue
-                                        
                                         elif info['status'] == 'processando':
                                             # Atualiza barra de progresso
                                             progress_bar.progress(info['progresso'])
                                             
                                             # Atualiza status
                                             status_text.text(f"Processando {info['index']}/{info['total']}: {info['numero']}")
-                                            
+                                            # Calcula tempo restante
+                                            tempo_decorrido = time.time() - tempo_inicio
+                                            if info['index'] > 1:
+                                                tempo_por_item = tempo_decorrido / (info['index'])
+                                                tempo_restante = tempo_por_item * (total_registros - info['index'])
+                                            else:
+                                                tempo_restante = tempo_estimado - tempo_decorrido
+
+
                                             # Atualiza métricas
-                                            tempo_col.metric("Tempo Restante", f"{info['tempo_restante']//60:.0f} min")
-                                            progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
-                                            
-                                            # Registra o tombamento no banco
-                                            db.registrar_tombamento(
-                                                numero=info['numero'],
-                                                processamento_id=info['processamento_id'],
-                                                status='sucesso' if info['sucesso'] else 'falha'
+                                            tempo_col.metric(
+                                                "Tempo Restante", 
+                                                f"{max(0, int(tempo_restante))//60} min {max(0, int(tempo_restante))%60} seg"
                                             )
-                                        
+                                            progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
+                                            # Registra o tombamento no banco
+                                            try:
+                                                db.registrar_tombamento(
+                                                    numero=info['numero'],
+                                                    processamento_id=processamento_id,
+                                                    status='sucesso' if info['sucesso'] else 'falha',
+                                                    mensagem_erro=info.get('mensagem_erro')
+                                                )
+                                                
+                                                if info['sucesso']:
+                                                    sucessos += 1
+                                                else:
+                                                    falhas += 1
+                                                    
+                                                sucessos_col.metric("Sucessos", sucessos)
+                                                falhas_col.metric("Falhas", falhas)
+                                                
+                                            except Exception as e:
+                                                st.error(f"Erro ao registrar tombamento: {str(e)}")
+                                            
+                                        elif info['status'] == 'finalizando':
+                                            status_text.text("Finalizando processamento...")
+                                            
                                         elif info['status'] == 'concluido':
                                             progress_bar.progress(1.0)
                                             status_text.text("Processamento concluído!")
                                             tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
                                             sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
                                             falhas_col.metric("Falhas", f"{info['total'] - info['sucessos']}")
-                                            
-                                            # Atualiza o processamento no banco
-                                            db.atualizar_processamento(
-                                                info['processamento_id'],
-                                                sucessos=info['sucessos'],
-                                                falhas=info['total'] - info['sucessos']
-                                            )
+                                             # Atualiza o processamento no banco
+                                            try:
+                                                db.atualizar_processamento(
+                                                    processamento_id,
+                                                    sucessos=sucessos,
+                                                    falhas=falhas
+                                                )
+                                                st.success("Processamento concluído com sucesso!")
+                                            except Exception as e:
+                                                st.error(f"Erro ao atualizar processamento: {str(e)}")
+                                            # Mostra resultados detalhados
+                                            if os.path.exists('resultados_tombamento.xlsx'):
+                                                df_resultados = pd.read_excel('resultados_tombamento.xlsx')
+                                                st.write("Resultados do processamento:")
+                                                st.dataframe(df_resultados)
                                             
                                             st.success("Processamento concluído com sucesso!")
                                             
@@ -475,6 +526,12 @@ def main():
                             if bot.login_with_javascript(cpf, senha):
                                 st.success("Login realizado com sucesso!")
                                 
+                                # Processa tombamentos com base na opção selecionada
+                                selected_indices = (
+                                    selected_indices if opcao == "🎯 Processar selecionados"
+                                    else None
+                                )
+                                
                                 # Componentes de progresso
                                 progress_bar = st.progress(0)
                                 status_text = st.empty()
@@ -490,54 +547,38 @@ def main():
                                         status_text.text("Iniciando processamento...")
                                         tempo_col.metric("Tempo Estimado", f"{info['tempo_estimado']//60} min")
                                         
-                                        if info.get('aguardando_id'):
-                                            # Registra o processamento no banco
-                                            processamento_id = db.registrar_processamento(
-                                                usuario=cpf,
-                                                tipo_arquivo="PDF" if uploaded_pdfs else "Excel",
-                                                total=info['total'],
-                                                sucessos=0,
-                                                falhas=0
-                                            )
-                                            continue
+                                    elif info['status'] == 'processando':
+                                        # Atualiza barra de progresso
+                                        progress_bar.progress(info['progresso'])
                                         
-                                        elif info['status'] == 'processando':
-                                            # Atualiza barra de progresso
-                                            progress_bar.progress(info['progresso'])
-                                            
-                                            # Atualiza status
-                                            status_text.text(f"Processando {info['index']}/{info['total']}: {info['numero']}")
-                                            
-                                            # Atualiza métricas
-                                            tempo_col.metric("Tempo Restante", f"{info['tempo_restante']//60:.0f} min")
-                                            progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
-                                            
-                                            # Registra o tombamento no banco
-                                            db.registrar_tombamento(
-                                                numero=info['numero'],
-                                                processamento_id=info['processamento_id'],
-                                                status='sucesso' if info['sucesso'] else 'falha'
-                                            )
+                                        # Atualiza status
+                                        status_text.text(f"Processando {info['index']}/{info['total']}: {info['numero']}")
                                         
-                                        elif info['status'] == 'concluido':
-                                            progress_bar.progress(1.0)
-                                            status_text.text("Processamento concluído!")
-                                            tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
-                                            sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
-                                            falhas_col.metric("Falhas", f"{info['total'] - info['sucessos']}")
-                                            
-                                            # Atualiza o processamento no banco
-                                            db.atualizar_processamento(
-                                                info['processamento_id'],
-                                                sucessos=info['sucessos'],
-                                                falhas=info['total'] - info['sucessos']
-                                            )
-                                            
-                                            st.success("Processamento concluído com sucesso!")
-                                            
-                                        elif info['status'] == 'erro':
-                                            st.error(f"Erro no processamento: {info['mensagem']}")
-                                            break
+                                        # Atualiza métricas
+                                        tempo_col.metric("Tempo Restante", f"{info['tempo_restante']//60:.0f} min")
+                                        progresso_col.metric("Progresso", f"{info['progresso']*100:.1f}%")
+                                        
+                                    elif info['status'] == 'finalizando':
+                                        status_text.text("Finalizando processamento...")
+                                        
+                                    elif info['status'] == 'concluido':
+                                        progress_bar.progress(1.0)
+                                        status_text.text("Processamento concluído!")
+                                        tempo_col.metric("Tempo Total", f"{info['tempo_total']//60:.0f} min")
+                                        sucessos_col.metric("Sucessos", f"{info['sucessos']}/{info['total']}")
+                                        falhas_col.metric("Falhas", f"{info['total'] - info['sucessos']}")
+                                        
+                                        # Mostra resultados detalhados
+                                        if os.path.exists('resultados_tombamento.xlsx'):
+                                            df_resultados = pd.read_excel('resultados_tombamento.xlsx')
+                                            st.write("Resultados do processamento:")
+                                            st.dataframe(df_resultados)
+                                        
+                                        st.success("Processamento concluído com sucesso!")
+                                        
+                                    elif info['status'] == 'erro':
+                                        st.error(f"Erro no processamento: {info['mensagem']}")
+                                        break
                             else:
                                 st.error("Falha no login!")
                                 
