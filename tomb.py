@@ -103,16 +103,51 @@ if __name__ == "__main__":
     
 class SisgepatAutomation:
     def __init__(self):
-        # Configurações do Chrome
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument('--start-maximized')
-        
-        # Inicializa o navegador Chrome localmente
-        self.driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), 
-            options=chrome_options
-        )
-        self.wait = WebDriverWait(self.driver, 10)
+        """
+        Inicializa o navegador com configurações específicas para Mac ARM
+        """
+        try:
+            # Configurações do Chrome
+            chrome_options = webdriver.ChromeOptions()
+            chrome_options.add_argument('--start-maximized')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            
+            # Detecta arquitetura do sistema
+            import platform
+            is_arm = platform.processor().startswith('arm')
+            
+            if is_arm:
+                # Configurações específicas para Mac ARM
+                chrome_options.binary_location = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                chrome_options.add_argument('--disable-gpu')
+            
+            # Configuração do serviço com retry
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+            
+            for _ in range(3):  # Tenta 3 vezes
+                try:
+                    service = Service(ChromeDriverManager().install())
+                    
+                    # Inicializa o Chrome
+                    self.driver = webdriver.Chrome(
+                        service=service,
+                        options=chrome_options
+                    )
+                    self.wait = WebDriverWait(self.driver, 10)
+                    print("✓ Chrome inicializado com sucesso")
+                    break
+                    
+                except Exception as e:
+                    print(f"Tentativa de inicialização falhou: {str(e)}")
+                    time.sleep(2)
+            else:
+                raise Exception("Não foi possível inicializar o Chrome após 3 tentativas")
+                
+        except Exception as e:
+            print(f"Erro fatal ao inicializar Chrome: {str(e)}")
+            raise
 
     def login(self, cpf, senha, ano="2024"):
         """
@@ -325,10 +360,6 @@ class SisgepatAutomation:
             return False
 
     def processar_tombamentos(self, excel_file, tombamentos_selecionados=None):
-        """
-        Processa os números de tombamento do arquivo Excel
-        tombamentos_selecionados: lista opcional de índices dos tombamentos a processar
-        """
         try:
             # Lê o arquivo Excel
             df = pd.read_excel(excel_file)
@@ -338,17 +369,18 @@ class SisgepatAutomation:
                 df = df.iloc[tombamentos_selecionados]
             
             total = len(df)
-            resultados = []  # Lista para armazenar resultados
+            resultados = []
             
-            # Estima tempo total (aproximadamente 10 segundos por tombamento)
+            # Estima tempo total
             tempo_estimado = total * 10
             tempo_inicio = time.time()
             
-            # Retorna informações para o frontend
-            yield {
+            # Registra início do processamento no banco
+            processamento_id = yield {
                 'status': 'inicio',
                 'total': total,
-                'tempo_estimado': tempo_estimado
+                'tempo_estimado': tempo_estimado,
+                'aguardando_id': True  # Flag para indicar que precisa do ID do processamento
             }
             
             # Navega até a tela correta
@@ -356,38 +388,34 @@ class SisgepatAutomation:
                 yield {'status': 'erro', 'mensagem': 'Erro na navegação inicial'}
                 return
             
-            # Aguarda mais tempo antes de começar o primeiro tombamento
-            time.sleep(5)  # Aumentei para 5 segundos
+            time.sleep(5)
             
             # Para cada número de tombamento
             sucessos = 0
             for index, row in df.iterrows():
                 numero = row['Numero_Tombamento']
                 
-                # No primeiro tombamento, espera mais tempo
                 if index == 0:
-                    time.sleep(3)  # Espera adicional para o primeiro
+                    time.sleep(3)
                 
-                # Calcula progresso e tempo restante
-                progresso = (index + 1) / total
+                progresso = min((index + 1) / total, 1.0)
                 tempo_decorrido = time.time() - tempo_inicio
                 tempo_restante = (tempo_decorrido / (index + 1)) * (total - (index + 1)) if index > 0 else tempo_estimado
                 
+                # Processa o tombamento
+                sucesso = self.preencher_tombamento(numero)
+                
+                # Registra o resultado no banco
                 yield {
                     'status': 'processando',
                     'numero': numero,
                     'index': index + 1,
                     'total': total,
                     'progresso': progresso,
-                    'tempo_restante': tempo_restante
+                    'tempo_restante': tempo_restante,
+                    'processamento_id': processamento_id,
+                    'sucesso': sucesso
                 }
-                
-                sucesso = self.preencher_tombamento(numero)
-                resultados.append({
-                    'numero': numero,
-                    'sucesso': sucesso,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                })
                 
                 if sucesso:
                     sucessos += 1
@@ -413,16 +441,22 @@ class SisgepatAutomation:
                 )
                 self.driver.execute_script("arguments[0].click();", confirmar_button)
                 
+                # Registra conclusão no banco
                 yield {
                     'status': 'concluido',
                     'total': total,
                     'sucessos': sucessos,
-                    'tempo_total': time.time() - tempo_inicio
+                    'tempo_total': time.time() - tempo_inicio,
+                    'processamento_id': processamento_id
                 }
                 return True
                 
             except Exception as e:
-                yield {'status': 'erro', 'mensagem': f"Erro ao finalizar: {str(e)}"}
+                yield {
+                    'status': 'erro', 
+                    'mensagem': f"Erro ao finalizar: {str(e)}",
+                    'processamento_id': processamento_id
+                }
                 return False
                 
         except Exception as e:
@@ -431,9 +465,20 @@ class SisgepatAutomation:
 
     def close(self):
         """
-        Fecha o navegador
+        Fecha o navegador com mais segurança
         """
-        self.driver.quit()
+        try:
+            if hasattr(self, 'driver'):
+                # Tenta fechar todas as janelas
+                self.driver.quit()
+                time.sleep(1)  # Pequena pausa para garantir que fechou
+        except Exception as e:
+            print(f"Erro ao fechar navegador: {str(e)}")
+            # Tenta forçar o fechamento se necessário
+            try:
+                self.driver.quit()
+            except:
+                pass
 
 def main():
     # Credenciais

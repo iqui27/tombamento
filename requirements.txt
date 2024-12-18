@@ -1,5 +1,5 @@
-streamlit
-pandas
-selenium
-webdriver-manager
-PyPDF2 
+streamlit==1.31.1
+pandas==2.2.0
+selenium==4.17.2
+webdriver-manager==4.0.1
+PyPDF2==3.0.1
