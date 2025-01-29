@@ -29,29 +29,70 @@ def extract_tombamento_numbers(text):
 
 def read_pdf(pdf_path):
     """
-    Lê o conteúdo de um arquivo PDF e retorna o texto completo
+    Lê o conteúdo de um arquivo PDF e retorna o texto completo.
+    Tenta primeiro extrair texto diretamente, se falhar, usa OCR.
     """
     try:
-        # Cria um objeto PDF reader
+        # Primeira tentativa: extrair texto diretamente
         pdf_reader = PdfReader(pdf_path)
-        
-        # Lista para armazenar o texto de todas as páginas
         text_content = []
         
-        # Extrai o texto de cada página
         for page in pdf_reader.pages:
-            text_content.append(page.extract_text())
+            text = page.extract_text()
+            if text.strip():  # Verifica se há texto significativo
+                text_content.append(text)
         
-        # Combina todo o texto em uma única string
-        return '\n'.join(text_content)
+        # Se encontrou texto em todas as páginas, retorna
+        if text_content and all(text.strip() for text in text_content):
+            return '\n'.join(text_content)
+        
+        # Se não encontrou texto, tenta OCR
+        print('Texto não encontrado diretamente. Tentando OCR...')
+        return extract_text_with_ocr(pdf_path)
         
     except Exception as e:
         print(f'Erro ao ler o arquivo PDF: {str(e)}')
         return ''
 
+def extract_text_with_ocr(pdf_path):
+    """
+    Extrai texto de um PDF usando OCR.
+    """
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+        import tempfile
+        import os
+        import platform
+        
+        text_content = []
+        
+        # Converte PDF para imagens
+        print('Convertendo PDF para imagens...')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # No Mac não precisa especificar poppler_path
+            if platform.system() == 'Windows':
+                images = convert_from_path(pdf_path, poppler_path=r'C:\Program Files\poppler-xx\Library\bin')
+            else:
+                images = convert_from_path(pdf_path)
+            
+            # Processa cada página
+            for i, image in enumerate(images, 1):
+                print(f'Processando página {i} com OCR...')
+                # Extrai texto da imagem usando OCR
+                text = pytesseract.image_to_string(image, lang='por')
+                text_content.append(text)
+        
+        return '\n'.join(text_content)
+        
+    except Exception as e:
+        print(f'Erro ao processar OCR: {str(e)}')
+        return ''
+
 def process_pdf(pdf_path):
     """
-    Processa o arquivo PDF e extrai os números de tombamento
+    Processa o arquivo PDF e extrai os números de tombamento.
+    Se não encontrar números no texto direto, tenta OCR.
     """
     try:
         # Lê o conteúdo do PDF
@@ -66,8 +107,19 @@ def process_pdf(pdf_path):
         # Extrai os números de tombamento
         tombamentos = extract_tombamento_numbers(content)
         
+        # Se não encontrou números, tenta OCR
+        if not tombamentos:
+            print('Nenhum número encontrado no texto direto. Tentando OCR...')
+            content_ocr = extract_text_with_ocr(pdf_path)
+            if content_ocr:
+                tombamentos = extract_tombamento_numbers(content_ocr)
+        
         # Remove possíveis duplicatas mantendo a ordem
         tombamentos = list(dict.fromkeys(tombamentos))
+        
+        if not tombamentos:
+            print('Nenhum número de tombamento encontrado, mesmo após OCR.')
+            return []
         
         # Cria um DataFrame com os números de tombamento
         df = pd.DataFrame(tombamentos, columns=['Numero_Tombamento'])
