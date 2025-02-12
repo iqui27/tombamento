@@ -200,6 +200,60 @@ class SisgepatAutomation:
         except Exception as e:
             print(f"Erro fatal ao inicializar Chrome: {str(e)}")
             raise
+        self.stop_requested = False
+
+    def stop_processing(self):
+        """
+        Sinaliza a parada do processamento e mantém o estado atual
+        """
+        self.stop_requested = True
+        # Aguarda um momento para garantir que o último estado foi salvo
+        time.sleep(1)
+        return True
+
+    def cleanup(self):
+        """
+        Fecha o navegador sem tentar salvar
+        """
+        try:
+            if hasattr(self, 'driver'):
+                self.driver.quit()
+                time.sleep(1)
+        except Exception as e:
+            print(f"Erro ao fechar navegador: {str(e)}")
+            try:
+                self.driver.quit()
+            except:
+                pass
+
+    def close(self):
+        """
+        Fecha o navegador após tentar salvar
+        """
+        try:
+            if hasattr(self, 'driver') and not self.stop_requested:
+                # Tenta salvar apenas se não foi solicitada parada
+                try:
+                    emitir_button = self.wait.until(
+                        EC.element_to_be_clickable((
+                            By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
+                        ))
+                    )
+                    self.driver.execute_script("arguments[0].click();", emitir_button)
+                    
+                    confirmar_button = self.wait.until(
+                        EC.element_to_be_clickable((By.ID, "btnModalOk"))
+                    )
+                    self.driver.execute_script("arguments[0].click();", confirmar_button)
+                except:
+                    pass
+            
+            # Fecha o navegador
+            self.cleanup()
+            
+        except Exception as e:
+            print(f"Erro ao fechar navegador: {str(e)}")
+            self.cleanup()
 
     def login(self, cpf, senha, ano="2024"):
         """
@@ -362,6 +416,60 @@ class SisgepatAutomation:
             print(f"Erro na navegação: {str(e)}")
             return False
 
+    def navegar_para_edicao_tgcd(self, numero_tgcd):
+        """
+        Navega até a tela de edição de uma TGCD específica
+        """
+        try:
+            print("Navegando para DGCD - Dados Gerais...")
+            # Navega diretamente para a URL
+            self.driver.get("https://sisgepat.fazenda.df.gov.br/SIGGO/SISGEPAT/Paginas/070_Dados_Gerais/FrmDGComplementar.aspx")
+            
+            # Aguarda a página carregar
+            time.sleep(5)
+            
+            print("✓ Navegou para DGCD - Dados Gerais")
+
+            # Preenche o número da TGCD
+            try:
+                print(f"Pesquisando TGCD: {numero_tgcd}")
+                input_tgcd = self.wait.until(
+                    EC.presence_of_element_located((
+                        By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_CphFormularioConsulta_TxtNomeTermoBusca"
+                    ))
+                )
+                input_tgcd.clear()
+                input_tgcd.send_keys(numero_tgcd)
+
+                # Clica no botão Pesquisar
+                pesquisar_button = self.wait.until(
+                    EC.element_to_be_clickable((
+                        By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnPesquisar"
+                    ))
+                )
+                self.driver.execute_script("arguments[0].click();", pesquisar_button)
+                time.sleep(3)
+
+                # Clica no botão Editar
+                editar_button = self.wait.until(
+                    EC.element_to_be_clickable((
+                        By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_CphResultadoPesquisa_GridResultado_ctl02_BtnAlterarItem"
+                    ))
+                )
+                self.driver.execute_script("arguments[0].click();", editar_button)
+                time.sleep(3)
+                
+                print("✓ TGCD encontrada e modo edição ativado")
+                return True
+
+            except Exception as e:
+                print(f"Erro ao pesquisar/editar TGCD: {str(e)}")
+                return False
+
+        except Exception as e:
+            print(f"Erro na navegação: {str(e)}")
+            return False
+
     def preencher_tombamento(self, numero):
         """
         Preenche um número de tombamento
@@ -411,35 +519,81 @@ class SisgepatAutomation:
             print(f"Erro ao preencher tombamento {numero}: {str(e)}")
             return False
 
-    def processar_tombamentos(self, excel_file, selected_indices=None):
+    def processar_tombamentos(self, excel_file, numero_tgcd=None, selected_indices=None):
         try:
-            # Lê o arquivo Excel
-            df = pd.read_excel(excel_file)
-            
+            # Carrega o DataFrame no início do processamento
+            self.df = pd.read_excel(excel_file)
+            # Adiciona colunas de status se não existirem
+            if 'status' not in self.df.columns:
+                self.df['status'] = 'pendente'
+            if 'data_processamento' not in self.df.columns:
+                self.df['data_processamento'] = None
+            if 'mensagem_erro' not in self.df.columns:
+                self.df['mensagem_erro'] = None
+                
             # Se tiver tombamentos selecionados, filtra o DataFrame
             if selected_indices is not None and len(selected_indices) > 0:
-                df = df.iloc[selected_indices]
+                self.df = self.df.iloc[selected_indices]
             
-            total = len(df)
+            total = len(self.df)
             
-            
-            
-            # Navega até a tela correta
-            if not self.navegar_para_dados_gerais():
-                yield {'status': 'erro', 'mensagem': 'Erro na navegação inicial'}
-                return
+            # Navega até a tela correta dependendo do modo
+            if numero_tgcd:
+                if not self.navegar_para_edicao_tgcd(numero_tgcd):
+                    yield {'status': 'erro', 'mensagem': 'Erro na navegação para edição'}
+                    return
+            else:
+                if not self.navegar_para_dados_gerais():
+                    yield {'status': 'erro', 'mensagem': 'Erro na navegação inicial'}
+                    return
             
             time.sleep(5)
             sucessos = 0
 
             # Para cada número de tombamento
-            for index, row in df.iterrows():
+            for idx, row in self.df.iterrows():
+                # Verifica se foi solicitada a parada
+                if self.stop_requested:
+                    try:
+                        # Tenta salvar antes de parar
+                        button_text = "Alterar" if numero_tgcd else "Emitir"
+                        emitir_button = self.wait.until(
+                            EC.element_to_be_clickable((
+                                By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
+                            ))
+                        )
+                        self.driver.execute_script("arguments[0].click();", emitir_button)
+                        
+                        # Aguarda e clica no botão Sim do alerta
+                        confirmar_button = self.wait.until(
+                            EC.element_to_be_clickable((By.ID, "btnModalOk"))
+                        )
+                        self.driver.execute_script("arguments[0].click();", confirmar_button)
+                        time.sleep(2)  # Aguarda o salvamento
+
+                        # Retorna informações do processamento interrompido
+                        yield {
+                            'status': 'concluido',
+                            'total': total,
+                            'processados': idx,
+                            'sucessos': sucessos,
+                            'mensagem': 'Processamento interrompido e progresso salvo!'
+                        }
+                    except Exception as e:
+                        yield {
+                            'status': 'erro',
+                            'mensagem': f'Erro ao salvar progresso: {str(e)}'
+                        }
+                    finally:
+                        self.cleanup()  # Fecha o Chrome após salvar ou em caso de erro
+                    return
+
                 numero = row['Numero_Tombamento']
                 
-                if index == 0:
+                if idx == 0:
                     time.sleep(3)
                 
-                progresso = min((index + 1) / total, 1.0)
+                progresso = min((idx + 1) / total, 1.0)
                 
                 # Processa o tombamento
                 try:
@@ -447,11 +601,21 @@ class SisgepatAutomation:
                     if sucesso:
                         sucessos += 1
 
+                    # Atualiza o status no DataFrame
+                    self.df.at[idx, 'status'] = 'sucesso' if sucesso else 'falha'
+                    self.df.at[idx, 'data_processamento'] = datetime.now()
+                    if not sucesso:
+                        self.df.at[idx, 'mensagem_erro'] = 'Falha no processamento'
+
+                    # Salva o progresso periodicamente (a cada 10 registros)
+                    if idx % 10 == 0:
+                        self.salvar_progresso()
+
                     # Retorna informações do processamento
                     yield {
                         'status': 'processando',
                         'numero': numero,
-                        'index': index + 1,
+                        'index': idx + 1,
                         'total': total,
                         'progresso': progresso,
                         'sucessos': sucessos,
@@ -463,7 +627,7 @@ class SisgepatAutomation:
                     yield {
                         'status': 'processando',
                         'numero': numero,
-                        'index': index + 1,
+                        'index': idx + 1,
                         'total': total,
                         'progresso': progresso,
                         'sucesso': False,
@@ -473,8 +637,9 @@ class SisgepatAutomation:
                 
                 time.sleep(2)
             
-             # Após inserir todos, clica em Emitir
+             # Após inserir todos ou parar, clica em Emitir/Alterar
             try:
+                button_text = "Alterar" if numero_tgcd else "Emitir"
                 emitir_button = self.wait.until(
                     EC.element_to_be_clickable((
                         By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
@@ -489,10 +654,12 @@ class SisgepatAutomation:
                 self.driver.execute_script("arguments[0].click();", confirmar_button)
                 
                 # Informa conclusão
+                status_msg = 'Processamento interrompido e salvo!' if self.stop_requested else 'Processamento concluído com sucesso!'
                 yield {
                     'status': 'concluido',
                     'total': total,
-                    'mensagem': 'Processamento concluído com sucesso!'
+                    'processados': idx + 1,
+                    'mensagem': status_msg
                 }
                 
             except Exception as e:
@@ -507,15 +674,168 @@ class SisgepatAutomation:
                 'mensagem': f"Erro ao processar arquivo: {str(e)}"
             }
 
+    def processar_tombamentos_em_lotes(self, excel_file, tamanho_lote=100, numero_tgcd=None, selected_indices=None):
+        """
+        Processa tombamentos em lotes do tamanho especificado
+        """
+        try:
+            # Lê o arquivo Excel
+            df = pd.read_excel(excel_file)
+            
+            # Se tiver tombamentos selecionados, filtra o DataFrame
+            if selected_indices is not None and len(selected_indices) > 0:
+                df = df.iloc[selected_indices]
+            
+            total_registros = len(df)
+            total_lotes = (total_registros + tamanho_lote - 1) // tamanho_lote
+            
+            print(f"Total de registros: {total_registros}")
+            print(f"Tamanho do lote: {tamanho_lote}")
+            print(f"Total de lotes: {total_lotes}")
+            
+            for num_lote in range(total_lotes):
+                if self.stop_requested:
+                    yield {
+                        'status': 'interrompido',
+                        'mensagem': 'Processamento interrompido pelo usuário'
+                    }
+                    return
+
+                inicio = num_lote * tamanho_lote
+                fim = min((num_lote + 1) * tamanho_lote, total_registros)
+                
+                print(f"\nProcessando lote {num_lote + 1}/{total_lotes} (registros {inicio + 1} até {fim})")
+                
+                # Reseta a navegação para cada novo lote
+                if numero_tgcd:
+                    if not self.navegar_para_edicao_tgcd(numero_tgcd):
+                        yield {
+                            'status': 'erro',
+                            'mensagem': 'Erro ao navegar para edição da TGCD'
+                        }
+                        return
+                else:
+                    if not self.navegar_para_dados_gerais():
+                        yield {
+                            'status': 'erro',
+                            'mensagem': 'Erro ao navegar para tela inicial'
+                        }
+                        return
+                
+                # Processa o lote atual
+                lote_atual = df.iloc[inicio:fim]
+                sucessos_lote = 0
+                
+                for idx, row in enumerate(lote_atual.itertuples(), start=1):
+                    if self.stop_requested:
+                        yield {
+                            'status': 'interrompido',
+                            'mensagem': 'Processamento do lote interrompido'
+                        }
+                        return
+                    
+                    numero = row.Numero_Tombamento
+                    progresso_lote = idx / len(lote_atual)
+                    
+                    try:
+                        sucesso = self.preencher_tombamento(numero)
+                        if sucesso:
+                            sucessos_lote += 1
+                        
+                        yield {
+                            'status': 'processando',
+                            'numero': numero,
+                            'index': inicio + idx,
+                            'total_lote': len(lote_atual),
+                            'total': total_registros,
+                            'lote_atual': num_lote + 1,
+                            'total_lotes': total_lotes,
+                            'progresso_lote': progresso_lote,
+                            'sucessos_lote': sucessos_lote
+                        }
+                        
+                    except Exception as e:
+                        yield {
+                            'status': 'erro',
+                            'mensagem': f'Erro ao processar {numero}: {str(e)}'
+                        }
+                    
+                    time.sleep(1)
+                
+                # Salva o lote atual
+                try:
+                    emitir_button = self.wait.until(
+                        EC.element_to_be_clickable((
+                            By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
+                        ))
+                    )
+                    self.driver.execute_script("arguments[0].click();", emitir_button)
+                    
+                    confirmar_button = self.wait.until(
+                        EC.element_to_be_clickable((By.ID, "btnModalOk"))
+                    )
+                    self.driver.execute_script("arguments[0].click();", confirmar_button)
+
+                    yield {
+                        'status': 'lote_concluido',
+                        'mensagem': f'Lote {num_lote + 1}/{total_lotes} concluído com {sucessos_lote} sucessos'
+                    }
+                    
+                except Exception as e:
+                    yield {
+                        'status': 'erro',
+                        'mensagem': f'Erro ao salvar lote {num_lote + 1}: {str(e)}'
+                    }
+                
+                time.sleep(3)  # Pausa entre lotes
+            
+            status_final = 'interrompido' if self.stop_requested else 'concluído'
+            yield {
+                'status': 'concluido',
+                'mensagem': f'Processamento {status_final}!',
+                'total_processados': total_registros
+            }
+            
+        except Exception as e:
+            yield {
+                'status': 'erro',
+                'mensagem': f"Erro ao processar arquivo: {str(e)}"
+            }
+
     def close(self):
         """
-        Fecha o navegador com mais segurança
+        Fecha o navegador após tentar salvar alterações
         """
         try:
             if hasattr(self, 'driver'):
-                # Tenta fechar todas as janelas
+                try:
+                    # Tenta salvar alterações antes de fechar
+                    button_text = "Alterar" if hasattr(self, 'numero_tgcd') and self.numero_tgcd else "Emitir"
+                    emitir_button = self.wait.until(
+                        EC.element_to_be_clickable((
+                            By.ID, "ctl00_ctl00_ctl00_CphBody_CphFormulario_BtnSalvar"
+                        ))
+                    )
+                    self.driver.execute_script("arguments[0].click();", emitir_button)
+                    
+                    # Aguarda e clica no botão Sim do alerta
+                    confirmar_button = self.wait.until(
+                        EC.element_to_be_clickable((By.ID, "btnModalOk"))
+                    )
+                    self.driver.execute_script("arguments[0].click();", confirmar_button)
+                    
+                    # Pequena pausa para garantir que salvou
+                    time.sleep(2)
+                    
+                    print("✓ Alterações salvas com sucesso")
+                except Exception as e:
+                    print(f"Aviso: Não foi possível salvar alterações antes de fechar: {str(e)}")
+                
+                # Fecha o navegador
                 self.driver.quit()
                 time.sleep(1)  # Pequena pausa para garantir que fechou
+                print("✓ Navegador fechado")
+                
         except Exception as e:
             print(f"Erro ao fechar navegador: {str(e)}")
             # Tenta forçar o fechamento se necessário
@@ -523,6 +843,27 @@ class SisgepatAutomation:
                 self.driver.quit()
             except:
                 pass
+
+    def salvar_progresso(self):
+        """
+        Salva o progresso atual do processamento em um arquivo
+        """
+        try:
+            if hasattr(self, 'df') and not self.df.empty:
+                # Cria um timestamp para o nome do arquivo
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                
+                # Nome do arquivo de backup
+                backup_file = f'resultados_tombamento_backup_{timestamp}.xlsx'
+                
+                # Salva o DataFrame atual
+                self.df.to_excel(backup_file, index=False)
+                
+                print(f"Progresso salvo em: {backup_file}")
+                return True
+        except Exception as e:
+            print(f"Erro ao salvar progresso: {str(e)}")
+            return False
 
 def main():
     # Credenciais
@@ -541,12 +882,14 @@ def main():
         if bot.login_with_javascript(CPF, SENHA):
             print("Login realizado com sucesso!")
             
-            # Processa os números
-            if bot.processar_tombamentos(EXCEL_FILE):
-                print("Processamento concluído com sucesso!")
-            else:
-                print("Houve erro no processamento!")
-            
+            # Exemplo de uso com processamento em lotes
+            for resultado in bot.processar_tombamentos_em_lotes(EXCEL_FILE, tamanho_lote=100):
+                if resultado['status'] == 'processando':
+                    print(f"Processando lote {resultado['lote_atual']}/{resultado['total_lotes']}: "
+                          f"Tombamento {resultado['numero']}")
+                elif resultado['status'] == 'lote_concluido':
+                    print(f"\nLote {resultado['lote_atual']} concluído: "
+                          f"{resultado['sucessos_lote']}/{resultado['total_lote']} sucessos")
         else:
             print("Falha no login!")
             
@@ -558,4 +901,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-    
